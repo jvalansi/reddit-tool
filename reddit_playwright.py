@@ -41,6 +41,46 @@ def api(method, path, data=None):
         return json.loads(r.read())
 
 
+def cmd_search(args):
+    if not TOKEN:
+        print(json.dumps({"error": "REDDIT_TOKEN_V2 not set."}))
+        sys.exit(1)
+
+    subreddits = [s.strip().lstrip("r/") for s in args.subreddits.split(",")] if args.subreddits else ["all"]
+    results = []
+
+    for sub in subreddits:
+        after = ""
+        while len(results) < args.limit:
+            path = f"/r/{sub}/search" if sub != "all" else "/search"
+            params = f"q={urllib.parse.quote(args.query)}&sort={args.sort}&restrict_sr=1&limit=25"
+            if after:
+                params += f"&after={after}"
+            data = api("GET", f"{path}?{params}")
+            children = data.get("data", {}).get("children", [])
+            if not children:
+                break
+            for child in children:
+                if len(results) >= args.limit:
+                    break
+                d = child["data"]
+                results.append({
+                    "id": d["id"],
+                    "subreddit": d["subreddit"],
+                    "title": d["title"],
+                    "score": d["score"],
+                    "num_comments": d["num_comments"],
+                    "url": f"https://www.reddit.com{d['permalink']}",
+                    "selftext": d.get("selftext", "")[:500],
+                    "created_utc": int(d["created_utc"]),
+                })
+            after = data.get("data", {}).get("after") or ""
+            if not after:
+                break
+
+    print(json.dumps(results, indent=2, ensure_ascii=False))
+
+
 def cmd_post(args):
     if not TOKEN:
         print(json.dumps({"error": "REDDIT_TOKEN_V2 not set. Export token_v2 cookie from browser."}))
@@ -103,6 +143,12 @@ def main():
     parser = argparse.ArgumentParser()
     sub = parser.add_subparsers(dest="command")
 
+    p_search = sub.add_parser("search")
+    p_search.add_argument("--query", required=True)
+    p_search.add_argument("--subreddits")
+    p_search.add_argument("--limit", type=int, default=10)
+    p_search.add_argument("--sort", default="relevance", choices=["relevance", "hot", "new", "top"])
+
     p_post = sub.add_parser("post")
     p_post.add_argument("--subreddit", required=True)
     p_post.add_argument("--title", required=True)
@@ -116,7 +162,9 @@ def main():
     p_get.add_argument("--post-id", required=True)
 
     args = parser.parse_args()
-    if args.command == "post":
+    if args.command == "search":
+        cmd_search(args)
+    elif args.command == "post":
         cmd_post(args)
     elif args.command == "get-comments":
         cmd_get_comments(args)
