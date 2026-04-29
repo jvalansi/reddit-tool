@@ -27,6 +27,14 @@ if os.path.exists(_env_path):
 
 TOKEN = os.environ.get("REDDIT_TOKEN_V2")
 UA = "script:promptware-validator:v1.0 (by u/toothwry)"
+_PROXY = os.environ.get("REDDIT_PROXY_URL", "")
+
+
+def _make_opener():
+    if not _PROXY:
+        return urllib.request.build_opener()
+    proxy_handler = urllib.request.ProxyHandler({"https": _PROXY, "http": _PROXY})
+    return urllib.request.build_opener(proxy_handler)
 
 
 def api(method, path, data=None):
@@ -37,7 +45,8 @@ def api(method, path, data=None):
     req.add_header("User-Agent", UA)
     if body:
         req.add_header("Content-Type", "application/x-www-form-urlencoded")
-    with urllib.request.urlopen(req, timeout=30) as r:
+    opener = _make_opener()
+    with opener.open(req, timeout=30) as r:
         return json.loads(r.read())
 
 
@@ -82,30 +91,75 @@ def cmd_search(args):
 
 
 def cmd_post(args):
-    if not TOKEN:
-        print(json.dumps({"error": "REDDIT_TOKEN_V2 not set. Export token_v2 cookie from browser."}))
+    from playwright.sync_api import sync_playwright
+    import re as _re
+    sys.path.insert(0, os.path.dirname(__file__))
+    from refresh_token import load_env, start_proxy
+
+    env = load_env()
+    user_token = env.get("REDDIT_USER_TOKEN") or env.get("REDDIT_TOKEN_V2")
+    required = ["REDDIT_SESSION", "REDDIT_CSRF_TOKEN", "REDDIT_LOID"]
+    missing = [k for k in required if not env.get(k)]
+    if missing or not user_token:
+        print(json.dumps({"error": f"Missing env vars: {missing or ['REDDIT_USER_TOKEN']}"}))
         sys.exit(1)
+
+    proxy_url = env.get("REDDIT_PROXY_URL", "")
+    proxy_thread = start_proxy(proxy_url) if proxy_url else None
+    if proxy_thread:
+        import time; time.sleep(0.5)
 
     subreddit = args.subreddit.lstrip("r/")
-    resp = api("POST", "/api/submit", {
-        "sr": subreddit,
-        "kind": "self",
-        "title": args.title,
-        "text": args.body,
-        "api_type": "json",
-    })
 
-    errors = resp.get("json", {}).get("errors", [])
-    if errors:
-        print(json.dumps({"error": errors}))
-        sys.exit(1)
+    try:
+        with sync_playwright() as pw:
+            browser = pw.chromium.launch(
+                headless=True,
+                args=["--no-sandbox"],
+                proxy={"server": "http://127.0.0.1:18899"} if proxy_url else None,
+            )
+            ctx = browser.new_context(
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            )
+            ctx.add_cookies([
+                {"name": "token_v2",       "value": user_token,               "domain": ".reddit.com", "path": "/"},
+                {"name": "reddit_session", "value": env["REDDIT_SESSION"],    "domain": ".reddit.com", "path": "/", "httpOnly": True, "secure": True},
+                {"name": "csrf_token",     "value": env["REDDIT_CSRF_TOKEN"], "domain": ".reddit.com", "path": "/"},
+                {"name": "loid",           "value": env["REDDIT_LOID"],       "domain": ".reddit.com", "path": "/"},
+            ])
+            page = ctx.new_page()
+            page.goto(f"https://old.reddit.com/r/{subreddit}/submit", wait_until="domcontentloaded", timeout=30000)
 
-    data = resp.get("json", {}).get("data", {})
+            # Click the "text" tab to enable the body textarea
+            page.evaluate("""
+                const tabs = document.querySelectorAll('.tabmenu li a, #text-desc-link, a[href="#self"]');
+                for (const t of tabs) {
+                    if (t.textContent.trim().toLowerCase() === 'text' || t.id === 'text-desc-link') {
+                        t.click(); break;
+                    }
+                }
+            """)
+            page.wait_for_timeout(800)
+
+            page.fill("textarea[name=title]", args.title)
+            # Wait for text area to be enabled after tab click
+            page.wait_for_selector("textarea[name=text]:not([disabled])", timeout=5000)
+            page.fill("textarea[name=text]", args.body)
+            page.click("button[type=submit]")
+            page.wait_for_load_state("domcontentloaded", timeout=15000)
+
+            url = page.url.replace("old.reddit.com", "reddit.com")
+            m = _re.search(r"/comments/(\w+)/", url)
+            browser.close()
+    finally:
+        if proxy_thread:
+            proxy_thread.stop_fn()
+
     print(json.dumps({
-        "post_id": data.get("id"),
-        "url": data.get("url"),
-        "subreddit": subreddit,
+        "id": m.group(1) if m else "",
+        "url": url,
         "title": args.title,
+        "subreddit": subreddit,
     }, indent=2))
 
 
