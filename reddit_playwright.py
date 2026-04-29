@@ -91,72 +91,76 @@ def cmd_search(args):
 
 
 def cmd_post(args):
-    from playwright.sync_api import sync_playwright
     import re as _re
     sys.path.insert(0, os.path.dirname(__file__))
-    from refresh_token import load_env, start_proxy
+    from refresh_token import load_env
 
     env = load_env()
-    user_token = env.get("REDDIT_USER_TOKEN") or env.get("REDDIT_TOKEN_V2")
-    required = ["REDDIT_SESSION", "REDDIT_CSRF_TOKEN", "REDDIT_LOID"]
-    missing = [k for k in required if not env.get(k)]
-    if missing or not user_token:
-        print(json.dumps({"error": f"Missing env vars: {missing or ['REDDIT_USER_TOKEN']}"}))
+    token = env.get("REDDIT_TOKEN_V2")
+    if not token:
+        print(json.dumps({"error": "REDDIT_TOKEN_V2 not set"}))
         sys.exit(1)
-
-    proxy_url = env.get("REDDIT_PROXY_URL", "")
-    proxy_thread = start_proxy(proxy_url) if proxy_url else None
-    if proxy_thread:
-        import time; time.sleep(0.5)
 
     subreddit = args.subreddit.lstrip("r/")
 
-    try:
-        with sync_playwright() as pw:
-            browser = pw.chromium.launch(
-                headless=True,
-                args=["--no-sandbox"],
-                proxy={"server": "http://127.0.0.1:18899"} if proxy_url else None,
-            )
-            ctx = browser.new_context(
-                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-            )
-            ctx.add_cookies([
-                {"name": "token_v2",       "value": user_token,               "domain": ".reddit.com", "path": "/"},
-                {"name": "reddit_session", "value": env["REDDIT_SESSION"],    "domain": ".reddit.com", "path": "/", "httpOnly": True, "secure": True},
-                {"name": "csrf_token",     "value": env["REDDIT_CSRF_TOKEN"], "domain": ".reddit.com", "path": "/"},
-                {"name": "loid",           "value": env["REDDIT_LOID"],       "domain": ".reddit.com", "path": "/"},
-            ])
-            page = ctx.new_page()
-            page.goto(f"https://old.reddit.com/r/{subreddit}/submit", wait_until="domcontentloaded", timeout=30000)
+    # Fetch available flairs so we can pick one if required
+    flair_id = getattr(args, "flair_id", None)
+    flair_text = getattr(args, "flair_text", None)
 
-            # Click the "text" tab to enable the body textarea
-            page.evaluate("""
-                const tabs = document.querySelectorAll('.tabmenu li a, #text-desc-link, a[href="#self"]');
-                for (const t of tabs) {
-                    if (t.textContent.trim().toLowerCase() === 'text' || t.id === 'text-desc-link') {
-                        t.click(); break;
-                    }
-                }
-            """)
-            page.wait_for_timeout(800)
+    post_data = {
+        "sr": subreddit,
+        "kind": "self",
+        "title": args.title,
+        "text": args.body,
+        "nsfw": "false",
+        "spoiler": "false",
+        "resubmit": "true",
+    }
+    if flair_id:
+        post_data["flair_id"] = flair_id
+    if flair_text:
+        post_data["flair_text"] = flair_text
 
-            page.fill("textarea[name=title]", args.title)
-            # Wait for text area to be enabled after tab click
-            page.wait_for_selector("textarea[name=text]:not([disabled])", timeout=5000)
-            page.fill("textarea[name=text]", args.body)
-            page.click("button[type=submit]")
-            page.wait_for_load_state("domcontentloaded", timeout=15000)
+    result = api("POST", "/api/submit", post_data)
 
-            url = page.url.replace("old.reddit.com", "reddit.com")
-            m = _re.search(r"/comments/(\w+)/", url)
-            browser.close()
-    finally:
-        if proxy_thread:
-            proxy_thread.stop_fn()
+    if not result.get("success"):
+        # Check for flair-required error
+        for item in result.get("jquery", []):
+            if isinstance(item, list) and len(item) >= 4:
+                val = item[3]
+                if isinstance(val, list) and val and isinstance(val[0], str) and "FLAIR_REQUIRED" in val[0]:
+                    # Auto-pick first available flair
+                    flair_req = urllib.request.Request(
+                        f"https://oauth.reddit.com/r/{subreddit}/api/link_flair_v2",
+                        headers={"Authorization": f"Bearer {token}", "User-Agent": UA},
+                    )
+                    opener = _make_opener()
+                    with opener.open(flair_req, timeout=15) as r:
+                        flairs = json.loads(r.read())
+                    if flairs:
+                        post_data["flair_id"] = flairs[0]["id"]
+                        post_data["flair_text"] = flairs[0]["text"]
+                        result = api("POST", "/api/submit", post_data)
+                    break
+
+    if not result.get("success"):
+        print(json.dumps({"error": "Post failed", "details": result}))
+        sys.exit(1)
+
+    url = ""
+    post_id = ""
+    for item in result.get("jquery", []):
+        if isinstance(item, list) and len(item) >= 4:
+            val = item[3]
+            if isinstance(val, list) and val and isinstance(val[0], str) and "reddit.com/r/" in val[0]:
+                url = val[0]
+                m = _re.search(r"/comments/(\w+)/", url)
+                if m:
+                    post_id = m.group(1)
+                break
 
     print(json.dumps({
-        "id": m.group(1) if m else "",
+        "id": post_id,
         "url": url,
         "title": args.title,
         "subreddit": subreddit,
@@ -207,6 +211,8 @@ def main():
     p_post.add_argument("--subreddit", required=True)
     p_post.add_argument("--title", required=True)
     p_post.add_argument("--body", required=True)
+    p_post.add_argument("--flair-id")
+    p_post.add_argument("--flair-text")
 
     p_comments = sub.add_parser("get-comments")
     p_comments.add_argument("--post-id", required=True)
