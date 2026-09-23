@@ -112,11 +112,13 @@ def refresh():
             ctx = browser.new_context(
                 user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
             )
-            ctx.add_cookies([
-                {"name": "csrf_token", "value": env["REDDIT_CSRF_TOKEN"], "domain": ".reddit.com", "path": "/"},
-                {"name": "loid",       "value": env["REDDIT_LOID"],       "domain": ".reddit.com", "path": "/"},
-                {"name": "token_v2",   "value": old_token,                "domain": ".reddit.com", "path": "/"},
-            ])
+            cookies = [
+                {"name": "csrf_token",      "value": env["REDDIT_CSRF_TOKEN"], "domain": ".reddit.com", "path": "/"},
+                {"name": "loid",            "value": env["REDDIT_LOID"],       "domain": ".reddit.com", "path": "/"},
+                {"name": "token_v2",        "value": old_token,                "domain": ".reddit.com", "path": "/"},
+                {"name": "reddit_session",  "value": env["REDDIT_SESSION"],    "domain": ".reddit.com", "path": "/", "httpOnly": True, "secure": True},
+            ]
+            ctx.add_cookies(cookies)
             page = ctx.new_page()
             page.goto("https://www.reddit.com/", timeout=60000, wait_until="domcontentloaded")
             page.wait_for_timeout(5000)
