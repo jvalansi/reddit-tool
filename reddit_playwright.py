@@ -9,6 +9,7 @@ Usage:
   python reddit_playwright.py get-post --post-id ID
 """
 
+import subprocess
 import argparse
 import json
 import os
@@ -28,6 +29,8 @@ if os.path.exists(_env_path):
 TOKEN = os.environ.get("REDDIT_TOKEN_V2")
 UA = "script:promptware-validator:v1.0 (by u/toothwry)"
 _PROXY = os.environ.get("REDDIT_PROXY_URL", "")
+if _PROXY.startswith("op://"):  # 1Password reference
+    _PROXY = subprocess.run(["/home/ubuntu/bin/secret", "REDDIT_PROXY_URL", "/home/ubuntu/slack-claude-bot/.env"], capture_output=True, text=True, check=True).stdout
 
 
 def _make_opener():
